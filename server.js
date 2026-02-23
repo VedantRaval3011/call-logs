@@ -24,6 +24,7 @@ const authenticate = (req, res, next) => {
 // ─── Schema ───────────────────────────────────────────
 const callLogSchema = new mongoose.Schema({
   phoneNumber:  { type: String, required: true, trim: true },
+  contactName:  { type: String, default: 'Unknown' },
   callType:     { type: String, enum: ['INCOMING', 'OUTGOING', 'MISSED'], required: true },
   duration:     { type: Number, default: 0 },
   timestamp:    { type: Date,   required: true },
@@ -68,12 +69,13 @@ app.get('/api/health', (req, res) => {
 // Submit a single call log
 app.post('/api/calls', authenticate, async (req, res) => {
   try {
-    const { phoneNumber, callType, duration, timestamp, deviceId, employeeName } = req.body;
+    const { phoneNumber, contactName, callType, duration, timestamp, deviceId, employeeName } = req.body;
     if (!phoneNumber || !callType || !deviceId)
       return res.status(400).json({ error: 'Missing required fields: phoneNumber, callType, deviceId' });
 
     const callLog = new CallLog({
       phoneNumber,
+      contactName:  contactName || 'Unknown',
       callType:     callType.toUpperCase(),
       duration:     duration || 0,
       timestamp:    new Date(timestamp || Date.now()),
@@ -99,6 +101,7 @@ app.post('/api/calls/batch', authenticate, async (req, res) => {
 
     const docs = calls.map(c => ({
       phoneNumber:  c.phoneNumber,
+      contactName:  c.contactName || 'Unknown',
       callType:     c.callType.toUpperCase(),
       duration:     c.duration || 0,
       timestamp:    new Date(c.timestamp || Date.now()),
