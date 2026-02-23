@@ -39,10 +39,24 @@ callLogSchema.index({ phoneNumber: 1 });
 
 const CallLog = mongoose.model('CallLog', callLogSchema);
 
-// ─── MongoDB Connection ───────────────────────────────
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ MongoDB connected:', MONGODB_URI))
-  .catch(err => { console.error('❌ MongoDB connection failed:', err.message); process.exit(1); });
+// ─── MongoDB Serverless Connection ───────────────────────
+let isConnected;
+
+const connectDB = async () => {
+  if (isConnected) return;
+  try {
+    const db = await mongoose.connect(MONGODB_URI);
+    isConnected = db.connections[0].readyState;
+    console.log('✅ MongoDB connected');
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err.message);
+  }
+};
+
+app.use(async (req, res, next) => {
+  await connectDB();
+  next();
+});
 
 // ─── Routes ───────────────────────────────────────────
 
