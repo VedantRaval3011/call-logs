@@ -40,6 +40,18 @@ callLogSchema.index({ phoneNumber: 1 });
 
 const CallLog = mongoose.model('CallLog', callLogSchema);
 
+const toggleLogSchema = new mongoose.Schema({
+  deviceId:     { type: String, required: true },
+  employeeName: { type: String, default: 'Unknown' },
+  status:       { type: String, enum: ['ON', 'OFF'], required: true },
+  timestamp:    { type: Date, required: true }
+}, { timestamps: true });
+
+toggleLogSchema.index({ deviceId: 1, timestamp: -1 });
+toggleLogSchema.index({ employeeName: 1 });
+
+const ToggleLog = mongoose.model('ToggleLog', toggleLogSchema);
+
 // ─── MongoDB Serverless Connection ───────────────────────
 let isConnected;
 
@@ -89,6 +101,29 @@ app.post('/api/calls', authenticate, async (req, res) => {
   } catch (err) {
     console.error('Error saving call:', err.message);
     res.status(500).json({ error: 'Failed to save call log' });
+  }
+});
+
+// Submit toggle status
+app.post('/api/status', authenticate, async (req, res) => {
+  try {
+    const { deviceId, employeeName, status, timestamp } = req.body;
+    if (!deviceId || !status)
+      return res.status(400).json({ error: 'Missing required fields: deviceId, status' });
+
+    const toggleLog = new ToggleLog({
+      deviceId,
+      employeeName: employeeName || 'Unknown',
+      status: status.toUpperCase(),
+      timestamp: new Date(timestamp || Date.now())
+    });
+
+    await toggleLog.save();
+    console.log(`🔌 Toggle ${status} | ${employeeName} | ${deviceId}`);
+    res.status(201).json({ success: true, message: 'Status saved', id: toggleLog._id });
+  } catch (err) {
+    console.error('Error saving status:', err.message);
+    res.status(500).json({ error: 'Failed to save status' });
   }
 });
 
