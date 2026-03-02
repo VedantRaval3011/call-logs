@@ -43,7 +43,7 @@ const CallLog = mongoose.model('CallLog', callLogSchema);
 const toggleLogSchema = new mongoose.Schema({
   deviceId:     { type: String, required: true },
   employeeName: { type: String, default: 'Unknown' },
-  status:       { type: String, enum: ['ON', 'OFF'], required: true },
+  status:       { type: String, enum: ['ON', 'OFF', 'PERMISSION_DENIED', 'PERMISSION_RESTORED'], required: true },
   timestamp:    { type: Date, required: true }
 }, { timestamps: true });
 
