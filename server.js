@@ -11,7 +11,7 @@ const API_KEY     = process.env.API_KEY     || "change-this-key";
 
 // ─── Middleware ───────────────────────────────────────
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
 const authenticate = (req, res, next) => {
@@ -51,6 +51,20 @@ toggleLogSchema.index({ deviceId: 1, timestamp: -1 });
 toggleLogSchema.index({ employeeName: 1 });
 
 const ToggleLog = mongoose.model('ToggleLog', toggleLogSchema);
+
+const contactSchema = new mongoose.Schema({
+  deviceId:     { type: String, required: true },
+  employeeName: { type: String, default: 'Unknown' },
+  contactName:  { type: String, required: true },
+  phoneNumber:  { type: String, required: true },
+  timestamp:    { type: Date, required: true },
+  syncedAt:     { type: Date, default: Date.now }
+}, { timestamps: true });
+
+contactSchema.index({ deviceId: 1, phoneNumber: 1 }, { unique: true });
+contactSchema.index({ employeeName: 1 });
+
+const Contact = mongoose.model('Contact', contactSchema);
 
 // ─── MongoDB Serverless Connection ───────────────────────
 let isConnected;
@@ -124,6 +138,37 @@ app.post('/api/status', authenticate, async (req, res) => {
   } catch (err) {
     console.error('Error saving status:', err.message);
     res.status(500).json({ error: 'Failed to save status' });
+  }
+});
+
+// Sync contacts from device
+app.post('/api/contacts', authenticate, async (req, res) => {
+  try {
+    const { contacts } = req.body;
+    if (!Array.isArray(contacts) || contacts.length === 0)
+      return res.status(400).json({ error: 'contacts must be a non-empty array' });
+
+    const bulkOps = contacts.map(c => ({
+      updateOne: {
+        filter: { deviceId: c.deviceId, phoneNumber: c.phoneNumber },
+        update: {
+          $set: {
+            employeeName: c.employeeName || 'Unknown',
+            contactName:  c.contactName  || 'Unknown',
+            timestamp:    new Date(Number(c.timestamp) || Date.now()),
+            syncedAt:     new Date()
+          }
+        },
+        upsert: true
+      }
+    }));
+
+    await Contact.bulkWrite(bulkOps);
+    console.log(`📇 Synced ${contacts.length} contacts`);
+    res.status(201).json({ success: true, count: contacts.length });
+  } catch (err) {
+    console.error('Error syncing contacts:', err.message);
+    res.status(500).json({ error: 'Failed to sync contacts' });
   }
 });
 
