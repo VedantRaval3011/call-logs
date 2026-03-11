@@ -86,11 +86,20 @@ app.use(async (req, res, next) => {
 });
 
 // ─── Contact Intelligence Webhook ───────────────────────
+const https = require('https');
 const triggerIntelligence = () => {
   const target = process.env.NEXT_URL || 'https://fleet-topaz.vercel.app';
-  fetch(`${target}/api/contact-intelligence/process`, {
+  if (!target.startsWith('https:')) return; // local dev skipped for safety
+
+  const req = https.request(`${target}/api/contact-intelligence/process`, {
+    method: 'GET',
     headers: { 'x-api-key': API_KEY }
-  }).catch(err => console.error('Failed to trigger contact intelligence:', err.message));
+  }, (res) => {
+    console.log(`Webhook pinged successfully. Status: ${res.statusCode}`);
+  });
+  
+  req.on('error', (e) => console.error('Failed to trigger contact intelligence:', e.message));
+  req.end();
 };
 
 // ─── Routes ───────────────────────────────────────────
