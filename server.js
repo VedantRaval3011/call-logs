@@ -85,6 +85,14 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// ─── Contact Intelligence Webhook ───────────────────────
+const triggerIntelligence = () => {
+  const target = process.env.NEXT_URL || 'https://fleet-topaz.vercel.app';
+  fetch(`${target}/api/contact-intelligence/process`, {
+    headers: { 'x-api-key': API_KEY }
+  }).catch(err => console.error('Failed to trigger contact intelligence:', err.message));
+};
+
 // ─── Routes ───────────────────────────────────────────
 
 // Health check — no auth required
@@ -111,6 +119,8 @@ app.post('/api/calls', authenticate, async (req, res) => {
 
     await callLog.save();
     console.log(`📞 ${callType} | ${employeeName} | ${phoneNumber} | ${duration}s`);
+    // trigger background processing in Next.js app
+    triggerIntelligence();
     res.status(201).json({ success: true, message: 'Call log saved', id: callLog._id });
   } catch (err) {
     console.error('Error saving call:', err.message);
@@ -190,6 +200,8 @@ app.post('/api/calls/batch', authenticate, async (req, res) => {
     }));
 
     const result = await CallLog.insertMany(docs, { ordered: false });
+    // trigger background processing in Next.js app
+    triggerIntelligence();
     res.status(201).json({ success: true, savedCount: result.length });
   } catch (err) {
     console.error('Batch insert error:', err.message);
