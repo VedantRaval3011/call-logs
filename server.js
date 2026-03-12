@@ -37,6 +37,11 @@ callLogSchema.index({ deviceId: 1, timestamp: -1 });
 callLogSchema.index({ employeeName: 1 });
 callLogSchema.index({ timestamp: -1 });
 callLogSchema.index({ phoneNumber: 1 });
+// Prevent the same physical call from being stored multiple times
+callLogSchema.index(
+  { deviceId: 1, phoneNumber: 1, timestamp: 1, duration: 1 },
+  { unique: true }
+);
 
 const CallLog = mongoose.model('CallLog', callLogSchema);
 
@@ -133,6 +138,12 @@ app.post('/api/calls', authenticate, async (req, res) => {
     res.status(201).json({ success: true, message: 'Call log saved', id: callLog._id });
   } catch (err) {
     console.error('Error saving call:', err.message);
+
+    // Duplicate call (same deviceId/number/timestamp/duration) — treat as success
+    if (err && err.code === 11000) {
+      return res.status(200).json({ success: true, message: 'Duplicate call log skipped' });
+    }
+
     res.status(500).json({ error: 'Failed to save call log' });
   }
 });
@@ -214,6 +225,18 @@ app.post('/api/calls/batch', authenticate, async (req, res) => {
     res.status(201).json({ success: true, savedCount: result.length });
   } catch (err) {
     console.error('Batch insert error:', err.message);
+
+    // If all failures are duplicate-key errors, treat the batch as effectively successful.
+    const writeErrors = err && err.writeErrors;
+    const allDupes =
+      Array.isArray(writeErrors) &&
+      writeErrors.length > 0 &&
+      writeErrors.every(e => e && e.code === 11000);
+
+    if (err && err.code === 11000 || allDupes) {
+      return res.status(200).json({ success: true, message: 'Duplicate call logs skipped in batch' });
+    }
+
     res.status(500).json({ error: 'Failed to save call logs' });
   }
 });
