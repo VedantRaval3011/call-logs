@@ -15,7 +15,7 @@
     "crons": [
         {
             "path": "/api/fcm-wake",
-            "schedule": "0 * * * *"
+            "schedule": "0 5 * * *"
         }
     ]
 }
