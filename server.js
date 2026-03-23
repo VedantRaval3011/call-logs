@@ -34,7 +34,7 @@ const authenticate = (req, res, next) => {
 const callLogSchema = new mongoose.Schema({
   phoneNumber:  { type: String, required: true, trim: true },
   contactName:  { type: String, default: 'Unknown' },
-  callType:     { type: String, enum: ['INCOMING', 'OUTGOING', 'MISSED'], required: true },
+  callType:     { type: String, enum: ['INCOMING', 'OUTGOING', 'MISSED', 'UNKNOWN'], required: true },
   duration:     { type: Number, default: 0 },
   timestamp:    { type: Date,   required: true },
   deviceId:     { type: String, required: true },
@@ -53,6 +53,12 @@ callLogSchema.index(
 );
 
 const CallLog = mongoose.model('CallLog', callLogSchema);
+
+function normalizeCallType(raw) {
+  const u = String(raw == null ? '' : raw).toUpperCase().trim();
+  if (['INCOMING', 'OUTGOING', 'MISSED', 'UNKNOWN'].includes(u)) return u;
+  return 'UNKNOWN';
+}
 
 const toggleLogSchema = new mongoose.Schema({
   deviceId:     { type: String, required: true },
@@ -144,7 +150,7 @@ app.post('/api/calls', authenticate, async (req, res) => {
     const callLog = new CallLog({
       phoneNumber,
       contactName:  contactName || 'Unknown',
-      callType:     callType.toUpperCase(),
+      callType:     normalizeCallType(callType),
       duration:     duration || 0,
       timestamp:    new Date(timestamp || Date.now()),
       deviceId,
@@ -232,7 +238,7 @@ app.post('/api/calls/batch', authenticate, async (req, res) => {
     const docs = calls.map(c => ({
       phoneNumber:  c.phoneNumber,
       contactName:  c.contactName || 'Unknown',
-      callType:     c.callType.toUpperCase(),
+      callType:     normalizeCallType(c.callType),
       duration:     c.duration || 0,
       timestamp:    new Date(c.timestamp || Date.now()),
       deviceId:     c.deviceId,
@@ -381,6 +387,16 @@ const { GoogleAuth } = require('google-auth-library');
 const fs   = require('fs');
 const path = require('path');
 
+function loadFirebaseServiceAccount() {
+  const envJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (envJson && String(envJson).trim()) {
+    return JSON.parse(envJson);
+  }
+  const saPath = path.join(__dirname, 'firebase-service-account.json');
+  if (!fs.existsSync(saPath)) return null;
+  return JSON.parse(fs.readFileSync(saPath, 'utf8'));
+}
+
 app.all('/api/fcm-wake', authenticate, async (req, res) => {
   try {
     const staleHours = parseInt(req.query.hours) || 12;
@@ -403,13 +419,13 @@ app.all('/api/fcm-wake', authenticate, async (req, res) => {
       return res.json({ success: true, message: 'No FCM tokens for stale devices', sent: 0 });
     }
 
-    // Get OAuth2 access token via service account
-    const saPath = path.join(__dirname, 'firebase-service-account.json');
-    if (!fs.existsSync(saPath)) {
-      return res.status(500).json({ error: 'firebase-service-account.json not found — see setup instructions' });
+    const serviceAccount = loadFirebaseServiceAccount();
+    if (!serviceAccount) {
+      return res.status(500).json({
+        error:
+          'Firebase credentials missing — set FIREBASE_SERVICE_ACCOUNT_JSON or add firebase-service-account.json',
+      });
     }
-
-    const serviceAccount = JSON.parse(fs.readFileSync(saPath, 'utf8'));
     const auth = new GoogleAuth({
       credentials: serviceAccount,
       scopes: ['https://www.googleapis.com/auth/firebase.messaging']
