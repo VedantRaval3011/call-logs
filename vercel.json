@@ -11,5 +11,11 @@
             "src": "/(.*)",
             "dest": "server.js"
         }
+    ],
+    "crons": [
+        {
+            "path": "/api/fcm-wake",
+            "schedule": "0 * * * *"
+        }
     ]
 }

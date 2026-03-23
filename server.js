@@ -16,9 +16,18 @@ app.use(morgan('combined'));
 
 const authenticate = (req, res, next) => {
   const key = req.headers['x-api-key'];
-  if (API_KEY && key !== API_KEY)
-    return res.status(401).json({ error: 'Unauthorized — invalid API key' });
-  next();
+  const authHeader = req.headers['authorization'];
+  
+  if (API_KEY && key === API_KEY) {
+    return next();
+  }
+
+  // Allow Vercel Cron jobs to hit protected endpoints
+  if (process.env.CRON_SECRET && authHeader === `Bearer ${process.env.CRON_SECRET}`) {
+    return next();
+  }
+
+  return res.status(401).json({ error: 'Unauthorized — invalid credentials' });
 };
 
 // ─── Schema ───────────────────────────────────────────
@@ -70,6 +79,17 @@ contactSchema.index({ deviceId: 1, phoneNumber: 1 }, { unique: true });
 contactSchema.index({ employeeName: 1 });
 
 const Contact = mongoose.model('Contact', contactSchema);
+
+// ─── FCM Token Schema ───────────────────────────────────────────
+const fcmTokenSchema = new mongoose.Schema({
+  deviceId:  { type: String, required: true, unique: true },
+  token:     { type: String, required: true },
+  updatedAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+fcmTokenSchema.index({ deviceId: 1 }, { unique: true });
+
+const FcmToken = mongoose.model('FcmToken', fcmTokenSchema);
 
 // ─── MongoDB Serverless Connection ───────────────────────
 let isConnected;
@@ -336,5 +356,114 @@ app.get('/api/employees', authenticate, async (req, res) => {
   }
 });
 
-// ─── Export for Vercel ─────────────────────────────────────
+// ─── FCM Token Registration ───────────────────────────────────
+app.post('/api/fcm-token', authenticate, async (req, res) => {
+  try {
+    const { deviceId, token } = req.body;
+    if (!deviceId || !token)
+      return res.status(400).json({ error: 'Missing required fields: deviceId, token' });
+
+    await FcmToken.findOneAndUpdate(
+      { deviceId },
+      { token, updatedAt: new Date() },
+      { upsert: true, new: true }
+    );
+    console.log(`🔑 FCM token registered for device ${deviceId}`);
+    res.status(200).json({ success: true, message: 'FCM token registered' });
+  } catch (err) {
+    console.error('Error saving FCM token:', err.message);
+    res.status(500).json({ error: 'Failed to save FCM token' });
+  }
+});
+
+// ─── FCM Wake-Up: send push to stale devices ─────────────────
+const { GoogleAuth } = require('google-auth-library');
+const fs   = require('fs');
+const path = require('path');
+
+app.all('/api/fcm-wake', authenticate, async (req, res) => {
+  try {
+    const staleHours = parseInt(req.query.hours) || 12;
+    const cutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000);
+
+    // Find devices whose most recent call log is older than the cutoff
+    const staleDevices = await CallLog.aggregate([
+      { $group: { _id: '$deviceId', lastCall: { $max: '$timestamp' } } },
+      { $match: { lastCall: { $lt: cutoff } } }
+    ]);
+
+    if (staleDevices.length === 0) {
+      return res.json({ success: true, message: 'No stale devices found', sent: 0 });
+    }
+
+    const deviceIds = staleDevices.map(d => d._id);
+    const tokens = await FcmToken.find({ deviceId: { $in: deviceIds } });
+
+    if (tokens.length === 0) {
+      return res.json({ success: true, message: 'No FCM tokens for stale devices', sent: 0 });
+    }
+
+    // Get OAuth2 access token via service account
+    const saPath = path.join(__dirname, 'firebase-service-account.json');
+    if (!fs.existsSync(saPath)) {
+      return res.status(500).json({ error: 'firebase-service-account.json not found — see setup instructions' });
+    }
+
+    const serviceAccount = JSON.parse(fs.readFileSync(saPath, 'utf8'));
+    const auth = new GoogleAuth({
+      credentials: serviceAccount,
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+    });
+    const client = await auth.getClient();
+    const accessTokenRes = await client.getAccessToken();
+    const accessToken = accessTokenRes.token;
+
+    const projectId = serviceAccount.project_id;
+    let sent = 0;
+    const errors = [];
+
+    for (const tokenDoc of tokens) {
+      try {
+        const fcmRes = await fetch(
+          `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              message: {
+                token: tokenDoc.token,
+                data: { action: 'sync_now' },
+                android: {
+                  priority: 'high',
+                  ttl: '0s'
+                }
+              }
+            })
+          }
+        );
+
+        if (fcmRes.ok) {
+          sent++;
+          console.log(`📩 FCM wake sent to device ${tokenDoc.deviceId}`);
+        } else {
+          const errBody = await fcmRes.text();
+          errors.push({ deviceId: tokenDoc.deviceId, status: fcmRes.status, body: errBody });
+          console.error(`❌ FCM send failed for ${tokenDoc.deviceId}: ${fcmRes.status} — ${errBody}`);
+        }
+      } catch (sendErr) {
+        errors.push({ deviceId: tokenDoc.deviceId, error: sendErr.message });
+      }
+    }
+
+    res.json({ success: true, staleDevices: deviceIds.length, tokensFound: tokens.length, sent, errors });
+  } catch (err) {
+    console.error('FCM wake error:', err.message);
+    res.status(500).json({ error: 'Failed to send FCM wake notifications' });
+  }
+});
+
+// ─── Export for Vercel ─────────────────────────────────────────
 module.exports = app;
