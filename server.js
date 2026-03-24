@@ -63,7 +63,19 @@ function normalizeCallType(raw) {
 const toggleLogSchema = new mongoose.Schema({
   deviceId:     { type: String, required: true },
   employeeName: { type: String, default: 'Unknown' },
-  status:       { type: String, enum: ['ON', 'OFF', 'PERMISSION_DENIED', 'PERMISSION_RESTORED'], required: true },
+  status:       {
+    type: String,
+    enum: [
+      'ON',
+      'OFF',
+      'PERMISSION_DENIED',
+      'PERMISSION_RESTORED',
+      'ADMIN_DISABLED',
+      'ADMIN_ENABLED',
+    ],
+    required: true,
+  },
+  reason:       { type: String },
   timestamp:    { type: Date, required: true }
 }, { timestamps: true });
 
@@ -177,7 +189,7 @@ app.post('/api/calls', authenticate, async (req, res) => {
 // Submit toggle status
 app.post('/api/status', authenticate, async (req, res) => {
   try {
-    const { deviceId, employeeName, status, timestamp } = req.body;
+    const { deviceId, employeeName, status, timestamp, reason } = req.body;
     if (!deviceId || !status)
       return res.status(400).json({ error: 'Missing required fields: deviceId, status' });
 
@@ -185,6 +197,7 @@ app.post('/api/status', authenticate, async (req, res) => {
       deviceId,
       employeeName: employeeName || 'Unknown',
       status: status.toUpperCase(),
+      reason: reason || undefined,
       timestamp: new Date(timestamp || Date.now())
     });
 
