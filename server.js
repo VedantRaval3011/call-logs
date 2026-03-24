@@ -397,27 +397,52 @@ function loadFirebaseServiceAccount() {
   return JSON.parse(fs.readFileSync(saPath, 'utf8'));
 }
 
+async function sendFcmSyncNowToTokens(tokenDocs, projectId, accessToken) {
+  let sent = 0;
+  const errors = [];
+  for (const tokenDoc of tokenDocs) {
+    try {
+      const fcmRes = await fetch(
+        `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: {
+              token: tokenDoc.token,
+              data: { action: 'sync_now' },
+              android: {
+                priority: 'high',
+                ttl: '0s',
+              },
+            },
+          }),
+        }
+      );
+
+      if (fcmRes.ok) {
+        sent++;
+        console.log(`📩 FCM wake sent to device ${tokenDoc.deviceId}`);
+      } else {
+        const errBody = await fcmRes.text();
+        errors.push({ deviceId: tokenDoc.deviceId, status: fcmRes.status, body: errBody });
+        console.error(`❌ FCM send failed for ${tokenDoc.deviceId}: ${fcmRes.status} — ${errBody}`);
+      }
+    } catch (sendErr) {
+      errors.push({ deviceId: tokenDoc.deviceId, error: sendErr.message });
+    }
+  }
+  return { sent, errors };
+}
+
 app.all('/api/fcm-wake', authenticate, async (req, res) => {
   try {
-    const staleHours = parseInt(req.query.hours) || 12;
-    const cutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000);
-
-    // Find devices whose most recent call log is older than the cutoff
-    const staleDevices = await CallLog.aggregate([
-      { $group: { _id: '$deviceId', lastCall: { $max: '$timestamp' } } },
-      { $match: { lastCall: { $lt: cutoff } } }
-    ]);
-
-    if (staleDevices.length === 0) {
-      return res.json({ success: true, message: 'No stale devices found', sent: 0 });
-    }
-
-    const deviceIds = staleDevices.map(d => d._id);
-    const tokens = await FcmToken.find({ deviceId: { $in: deviceIds } });
-
-    if (tokens.length === 0) {
-      return res.json({ success: true, message: 'No FCM tokens for stale devices', sent: 0 });
-    }
+    const staleHours = parseInt(req.query.hours, 10) || 12;
+    const wakeAll =
+      req.query.all === '1' || req.query.all === 'true' || req.query.all === 'yes';
 
     const serviceAccount = loadFirebaseServiceAccount();
     if (!serviceAccount) {
@@ -426,55 +451,82 @@ app.all('/api/fcm-wake', authenticate, async (req, res) => {
           'Firebase credentials missing — set FIREBASE_SERVICE_ACCOUNT_JSON or add firebase-service-account.json',
       });
     }
+
+    let tokens;
+    let staleDeviceCount = 0;
+    let mode = 'stale';
+
+    if (wakeAll) {
+      mode = 'all';
+      tokens = await FcmToken.find({});
+      if (tokens.length === 0) {
+        return res.json({
+          success: true,
+          mode,
+          message: 'No FCM tokens registered in the database.',
+          staleDevices: 0,
+          tokensFound: 0,
+          sent: 0,
+          errors: [],
+        });
+      }
+    } else {
+      const cutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000);
+      const staleDevices = await CallLog.aggregate([
+        { $group: { _id: '$deviceId', lastCall: { $max: '$timestamp' } } },
+        { $match: { lastCall: { $lt: cutoff } } },
+      ]);
+
+      if (staleDevices.length === 0) {
+        const registeredTokens = await FcmToken.countDocuments();
+        return res.json({
+          success: true,
+          mode,
+          message: `No stale devices — every device has a call log within the last ${staleHours}h. Wake only targets “quiet” devices. ${registeredTokens} FCM token(s) on file. Use ?all=1 to ping all registered devices (testing).`,
+          staleDevices: 0,
+          tokensFound: 0,
+          sent: 0,
+          registeredTokens,
+          errors: [],
+        });
+      }
+
+      const deviceIds = staleDevices.map((d) => d._id);
+      staleDeviceCount = deviceIds.length;
+      tokens = await FcmToken.find({ deviceId: { $in: deviceIds } });
+
+      if (tokens.length === 0) {
+        return res.json({
+          success: true,
+          mode,
+          message: `${staleDeviceCount} device(s) are stale (no recent logs) but none have an FCM token. Open the Android app with monitoring on so it can register.`,
+          staleDevices: staleDeviceCount,
+          tokensFound: 0,
+          sent: 0,
+          errors: [],
+        });
+      }
+    }
+
     const auth = new GoogleAuth({
       credentials: serviceAccount,
-      scopes: ['https://www.googleapis.com/auth/firebase.messaging']
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging'],
     });
     const client = await auth.getClient();
     const accessTokenRes = await client.getAccessToken();
     const accessToken = accessTokenRes.token;
 
     const projectId = serviceAccount.project_id;
-    let sent = 0;
-    const errors = [];
+    const { sent, errors } = await sendFcmSyncNowToTokens(tokens, projectId, accessToken);
 
-    for (const tokenDoc of tokens) {
-      try {
-        const fcmRes = await fetch(
-          `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              message: {
-                token: tokenDoc.token,
-                data: { action: 'sync_now' },
-                android: {
-                  priority: 'high',
-                  ttl: '0s'
-                }
-              }
-            })
-          }
-        );
-
-        if (fcmRes.ok) {
-          sent++;
-          console.log(`📩 FCM wake sent to device ${tokenDoc.deviceId}`);
-        } else {
-          const errBody = await fcmRes.text();
-          errors.push({ deviceId: tokenDoc.deviceId, status: fcmRes.status, body: errBody });
-          console.error(`❌ FCM send failed for ${tokenDoc.deviceId}: ${fcmRes.status} — ${errBody}`);
-        }
-      } catch (sendErr) {
-        errors.push({ deviceId: tokenDoc.deviceId, error: sendErr.message });
-      }
-    }
-
-    res.json({ success: true, staleDevices: deviceIds.length, tokensFound: tokens.length, sent, errors });
+    res.json({
+      success: true,
+      mode,
+      staleDevices: mode === 'all' ? 0 : staleDeviceCount,
+      tokensFound: tokens.length,
+      sent,
+      errors,
+    });
   } catch (err) {
     console.error('FCM wake error:', err.message);
     res.status(500).json({ error: 'Failed to send FCM wake notifications' });
