@@ -424,6 +424,10 @@ app.get('/api/employees', authenticate, async (req, res) => {
   }
 });
 
+// Register location Mongo models early (DeviceLocationState) without mounting
+// routes yet — FCM helpers used by those routes are defined later in this file.
+require('./locationRoutes');
+
 // ─── Enrollment Routes ─────────────────────────────────────────
 
 // POST /api/enrollment/redeem — no auth, one-time code exchange
@@ -460,6 +464,34 @@ app.post('/api/enrollment/redeem', async (req, res) => {
 
     enrollmentCode.usedAt = new Date();
     await enrollmentCode.save();
+
+    // Surface the device on fleet-map / route pickers immediately, even before
+    // the first GPS fix arrives.
+    if (enrollmentCode.capabilities?.locationTracking) {
+      try {
+        const DeviceLocationState = mongoose.models.DeviceLocationState;
+        if (DeviceLocationState) {
+          await DeviceLocationState.findOneAndUpdate(
+            { deviceId },
+            {
+              $set: {
+                deviceId,
+                companyId: enrollmentCode.companyId,
+                employeeId: enrollmentCode.employeeId,
+                employeeName: enrollmentCode.employeeName,
+                vehicle: enrollmentCode.vehicle,
+                driverId: enrollmentCode.driverId,
+                lastReceivedAt: new Date(),
+                trackingStatus: 'ENROLLED',
+              },
+            },
+            { upsert: true }
+          );
+        }
+      } catch (stateErr) {
+        console.error('DeviceLocationState seed (non-fatal):', stateErr.message);
+      }
+    }
 
     console.log(`📱 Device enrolled: ${deviceId} (${enrollmentCode.employeeName})`);
 
@@ -708,6 +740,17 @@ app.all('/api/fcm-wake', authenticate, async (req, res) => {
 // ─── Location Routes ──────────────────────────────────────────
 const mountLocationRoutes = require('./locationRoutes');
 mountLocationRoutes(app, {
+  FcmToken,
+  DeviceEnrollment,
+  loadFirebaseServiceAccount,
+  sendFcmDataToTokens,
+  authenticate,
+  GoogleAuth,
+});
+
+// ─── Android Caller Lookup Routes ──────────────────────────────
+const mountCallerLookupRoutes = require('./callerLookupRoutes');
+mountCallerLookupRoutes(app, {
   FcmToken,
   DeviceEnrollment,
   loadFirebaseServiceAccount,

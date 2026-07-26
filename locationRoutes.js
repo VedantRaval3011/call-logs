@@ -237,7 +237,8 @@ module.exports = function mountLocationRoutes(app, deps) {
         }
       }
 
-      // Update session aggregate fields
+      // Update session aggregate fields (upsert so routes appear even if
+      // the device never called /sessions/upsert).
       if (sessionId && acceptedPointIds.length > 0) {
         const acceptedPts = points.filter(p => acceptedPointIds.includes(p.pointId));
         const times = acceptedPts
@@ -247,13 +248,25 @@ module.exports = function mountLocationRoutes(app, deps) {
 
         const sessionUpdate = {
           $inc: { totalPoints: acceptedPointIds.length },
-          $set: { lastUploadAt: new Date() },
+          $set: {
+            lastUploadAt: new Date(),
+            deviceId: resolvedDeviceId,
+            companyId: req.enrollment.companyId,
+            employeeId: req.enrollment.employeeId,
+            driverId: req.enrollment.driverId,
+          },
+          $setOnInsert: {
+            sessionId,
+            status: 'ACTIVE',
+            startedAt: times[0] || new Date(),
+            vehicleId: req.enrollment.vehicle?.id,
+          },
         };
         if (times.length > 0) {
           sessionUpdate.$min = { firstPointAt: times[0] };
-          sessionUpdate.$max = { lastPointAt:  times[times.length - 1] };
+          sessionUpdate.$max = { lastPointAt: times[times.length - 1] };
         }
-        await LocationSession.updateOne({ sessionId }, sessionUpdate);
+        await LocationSession.updateOne({ sessionId }, sessionUpdate, { upsert: true });
       }
 
       // Update DeviceLocationState with the most-recent accepted point
@@ -271,6 +284,13 @@ module.exports = function mountLocationRoutes(app, deps) {
             latestCoordinates: { lat: latestPt.latitude, lng: latestPt.longitude },
             lastReceivedAt:    new Date(),
             lastUploadAt:      new Date(),
+            // Always stamp enrollment identity so company-scoped fleet map sees the device.
+            companyId:         req.enrollment.companyId,
+            employeeId:        req.enrollment.employeeId,
+            employeeName:      req.enrollment.employeeName,
+            vehicle:           req.enrollment.vehicle,
+            driverId:          req.enrollment.driverId,
+            trackingStatus:    'TRACKING',
           };
           if (latestPt.accuracyMeters       != null) stateSet.latestAccuracy = latestPt.accuracyMeters;
           if (latestPt.speedMetersPerSecond != null) stateSet.latestSpeed    = latestPt.speedMetersPerSecond;
@@ -301,7 +321,15 @@ module.exports = function mountLocationRoutes(app, deps) {
       } = req.body;
       const resolvedDeviceId = deviceId || req.enrollment.deviceId;
 
-      const setFields = { deviceId: resolvedDeviceId, lastReceivedAt: new Date() };
+      const setFields = {
+        deviceId: resolvedDeviceId,
+        lastReceivedAt: new Date(),
+        companyId: req.enrollment.companyId,
+        employeeId: req.enrollment.employeeId,
+        employeeName: req.enrollment.employeeName,
+        vehicle: req.enrollment.vehicle,
+        driverId: req.enrollment.driverId,
+      };
       if (trackingStatus   !== undefined) setFields.trackingStatus   = trackingStatus;
       if (permissionStatus !== undefined) setFields.permissionStatus = permissionStatus;
       if (gpsEnabled       !== undefined) setFields.gpsEnabled       = gpsEnabled;
