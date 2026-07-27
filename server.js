@@ -495,6 +495,14 @@ app.post('/api/enrollment/redeem', async (req, res) => {
 
     console.log(`📱 Device enrolled: ${deviceId} (${enrollmentCode.employeeName})`);
 
+    // Never return a blank serverUrl — Android needs it for all later API calls.
+    const resolvedServerUrl =
+      enrollmentCode.serverUrl ||
+      process.env.SERVER_URL ||
+      process.env.BACKEND_URL ||
+      `${req.protocol}://${req.get('host')}` ||
+      '';
+
     res.json({
       employeeId:   enrollmentCode.employeeId,
       employeeName: enrollmentCode.employeeName,
@@ -502,7 +510,7 @@ app.post('/api/enrollment/redeem', async (req, res) => {
       capabilities: enrollmentCode.capabilities,
       vehicle:      enrollmentCode.vehicle || null,
       deviceToken,
-      serverUrl:    enrollmentCode.serverUrl || process.env.SERVER_URL || '',
+      serverUrl:    String(resolvedServerUrl).replace(/\/$/, ''),
       apiKey:       enrollmentCode.apiKey    || process.env.API_KEY    || '',
       deviceId,
       webBaseUrl:   process.env.NEXT_URL || '',
