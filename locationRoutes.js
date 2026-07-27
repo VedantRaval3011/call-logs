@@ -81,7 +81,7 @@ const locationCommandSchema = new mongoose.Schema({
   deviceId:  { type: String, required: true },
   type:      {
     type: String,
-    enum: ['location_upload', 'location_latest', 'location_live_mode', 'location_stop_live_mode'],
+    enum: ['location_upload', 'location_latest', 'location_live_mode', 'location_stop_live_mode', 'location_start_tracking', 'location_stop_tracking'],
     required: true,
   },
   status: {
@@ -405,7 +405,7 @@ module.exports = function mountLocationRoutes(app, deps) {
       const { deviceId, sessionId, fromTime, toTime, type: rawType } = req.body;
       if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
 
-      const allowed = ['location_upload', 'location_latest', 'location_live_mode', 'location_stop_live_mode'];
+      const allowed = ['location_upload', 'location_latest', 'location_live_mode', 'location_stop_live_mode', 'location_start_tracking', 'location_stop_tracking'];
       const type = allowed.includes(rawType) ? rawType : 'location_upload';
 
       const cmdData = {

@@ -170,6 +170,64 @@ module.exports = function mountCallerLookupRoutes(app, deps) {
     }
   };
 
+  async function createCallerLookupJob({
+    enrollment,
+    companyId,
+    createdBy,
+    mobileProvider = 'jio',
+    seriesId,
+    seriesPrefix,
+    seriesLabel,
+    startNumber,
+    endNumber,
+    batchSize = 200,
+    delayMs = 200,
+    workers = 1,
+    lookupProviderId = 'android-call-log-cache',
+    maxRetries = 2,
+    source = 'dashboard',
+  }) {
+    if (!seriesId || !seriesPrefix || !seriesLabel) {
+      throw Object.assign(new Error('seriesId, seriesPrefix, and seriesLabel are required'), { status: 400 });
+    }
+    const plan = numberPlan(seriesPrefix, startNumber, endNumber, batchSize);
+    await CallerLookupJob.updateMany(
+      { deviceId: enrollment.deviceId, status: { $in: ['requested', 'running', 'pausing', 'paused'] } },
+      { $set: { status: 'stopped', requestedAction: null, stoppedAt: new Date() } }
+    );
+
+    const job = await CallerLookupJob.create({
+      companyId: companyId || enrollment.companyId || null,
+      createdBy: createdBy || enrollment.employeeName || enrollment.deviceId,
+      deviceId: enrollment.deviceId,
+      employeeName: enrollment.employeeName,
+      status: 'requested',
+      requestedAction: 'start',
+      mobileProvider,
+      seriesId,
+      seriesPrefix,
+      seriesLabel,
+      startNumber: plan.startNumber,
+      endNumber: plan.endNumber,
+      batchSize: plan.total,
+      delayMs: Math.min(Math.max(Number(delayMs) || 0, 0), 60000),
+      workers: Math.min(Math.max(Number(workers) || 1, 1), 20),
+      lookupProviderId,
+      maxRetries: Math.min(Math.max(Number(maxRetries) || 0, 0), 5),
+      totalPlanned: plan.total,
+      currentNumber: plan.startNumber,
+    });
+    await CallerLookupLog.create({
+      jobId: job._id,
+      deviceId: enrollment.deviceId,
+      level: 'info',
+      message: source === 'android'
+        ? `Job created on Android device (batch ${plan.total}); starting lookups`
+        : 'Job requested from dashboard; waiting for Android device',
+    });
+    return job;
+  }
+
   // Dashboard/admin creates the command. Android owns all number generation and lookup execution.
   app.post('/api/caller-lookup/jobs', authenticate, async (req, res) => {
     try {
@@ -179,8 +237,8 @@ module.exports = function mountCallerLookupRoutes(app, deps) {
         batchSize = 200, delayMs = 200, workers = 1,
         lookupProviderId = 'android-call-log-cache', maxRetries = 2,
       } = req.body;
-      if (!deviceId || !seriesId || !seriesPrefix || !seriesLabel) {
-        return res.status(400).json({ error: 'deviceId and series fields are required' });
+      if (!deviceId) {
+        return res.status(400).json({ error: 'deviceId is required' });
       }
       const enrollment = await DeviceEnrollment.findOne({ deviceId, revoked: { $ne: true } });
       if (!enrollment) return res.status(404).json({ error: 'Enrolled device not found' });
@@ -188,44 +246,28 @@ module.exports = function mountCallerLookupRoutes(app, deps) {
         return res.status(403).json({ error: 'Device does not belong to this company' });
       }
 
-      const plan = numberPlan(seriesPrefix, startNumber, endNumber, batchSize);
-      await CallerLookupJob.updateMany(
-        { deviceId, status: { $in: ['requested', 'running', 'pausing', 'paused'] } },
-        { $set: { status: 'stopped', requestedAction: null, stoppedAt: new Date() } }
-      );
-
-      const job = await CallerLookupJob.create({
-        companyId: companyId || enrollment.companyId || null,
+      const job = await createCallerLookupJob({
+        enrollment,
+        companyId,
         createdBy,
-        deviceId,
-        employeeName: enrollment.employeeName,
-        status: 'requested',
-        requestedAction: 'start',
         mobileProvider,
         seriesId,
         seriesPrefix,
         seriesLabel,
-        startNumber: plan.startNumber,
-        endNumber: plan.endNumber,
-        batchSize: plan.total,
-        delayMs: Math.min(Math.max(Number(delayMs) || 0, 0), 60000),
-        workers: Math.min(Math.max(Number(workers) || 1, 1), 20),
+        startNumber,
+        endNumber,
+        batchSize,
+        delayMs,
+        workers,
         lookupProviderId,
-        maxRetries: Math.min(Math.max(Number(maxRetries) || 0, 0), 5),
-        totalPlanned: plan.total,
-        currentNumber: plan.startNumber,
-      });
-      await CallerLookupLog.create({
-        jobId: job._id,
-        deviceId,
-        level: 'info',
-        message: 'Job requested from dashboard; waiting for Android device',
+        maxRetries,
+        source: 'dashboard',
       });
       const fcmSent = await sendDeviceCommand(deviceId, 'caller_lookup_start', job._id);
       res.status(201).json({ job, fcmSent });
     } catch (err) {
       console.error('Create caller lookup job error:', err.message);
-      res.status(400).json({ error: err.message || 'Failed to create caller lookup job' });
+      res.status(err.status || 400).json({ error: err.message || 'Failed to create caller lookup job' });
     }
   });
 
@@ -261,6 +303,72 @@ module.exports = function mountCallerLookupRoutes(app, deps) {
     }
   });
 
+  // Android device creates its own job (asks user for batch size on-device).
+  app.post('/api/caller-lookup/device/jobs', authenticateDeviceToken, async (req, res) => {
+    try {
+      const {
+        mobileProvider = 'jio',
+        seriesId, seriesPrefix, seriesLabel, startNumber, endNumber,
+        batchSize = 200, delayMs = 200, workers = 1,
+        lookupProviderId = 'android-call-log-cache', maxRetries = 2,
+      } = req.body;
+      if (!Number.isFinite(Number(batchSize)) || Number(batchSize) < 1) {
+        return res.status(400).json({ error: 'batchSize is required (e.g. 200)' });
+      }
+      const job = await createCallerLookupJob({
+        enrollment: req.enrollment,
+        companyId: req.enrollment.companyId || null,
+        createdBy: req.enrollment.employeeName || req.enrollment.deviceId,
+        mobileProvider,
+        seriesId,
+        seriesPrefix,
+        seriesLabel,
+        startNumber,
+        endNumber,
+        batchSize,
+        delayMs,
+        workers,
+        lookupProviderId,
+        maxRetries,
+        source: 'android',
+      });
+      res.status(201).json({ job });
+    } catch (err) {
+      console.error('Device create caller lookup job error:', err.message);
+      res.status(err.status || 400).json({ error: err.message || 'Failed to create caller lookup job' });
+    }
+  });
+
+  app.post('/api/caller-lookup/device/jobs/:id/control', authenticateDeviceToken, async (req, res) => {
+    try {
+      const action = String(req.body.action || '').toLowerCase();
+      if (!['pause', 'resume', 'stop'].includes(action)) {
+        return res.status(400).json({ error: 'action must be pause, resume, or stop' });
+      }
+      const current = await CallerLookupJob.findOne({
+        _id: req.params.id,
+        deviceId: req.enrollment.deviceId,
+      });
+      if (!current) return res.status(404).json({ error: 'Job not found' });
+
+      const status = action === 'pause' ? 'pausing' : action === 'stop' ? 'stopping' : 'requested';
+      current.status = status;
+      current.requestedAction = action;
+      if (action === 'resume') current.pausedAt = null;
+      await current.save();
+      await CallerLookupLog.create({
+        jobId: current._id,
+        deviceId: current.deviceId,
+        level: 'info',
+        message: `${action} requested from Android device`,
+      });
+      res.json({ job: current });
+    } catch (err) {
+      console.error('Device caller lookup control error:', err.message);
+      res.status(500).json({ error: 'Failed to control caller lookup job' });
+    }
+  });
+
   // Polling fallback for missed FCM. Also supports restart/resume after process death or reboot.
   app.get('/api/caller-lookup/device/jobs', authenticateDeviceToken, async (req, res) => {
     try {
@@ -271,6 +379,16 @@ module.exports = function mountCallerLookupRoutes(app, deps) {
       res.json({ jobs });
     } catch (err) {
       res.status(500).json({ error: 'Failed to get caller lookup jobs' });
+    }
+  });
+
+  app.get('/api/caller-lookup/device/jobs/latest', authenticateDeviceToken, async (req, res) => {
+    try {
+      const job = await CallerLookupJob.findOne({ deviceId: req.enrollment.deviceId })
+        .sort({ updatedAt: -1 });
+      res.json({ job: job || null });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to get latest caller lookup job' });
     }
   });
 
