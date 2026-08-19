@@ -99,11 +99,16 @@ function normalizeNumber(raw) {
 }
 
 function numberPlan(prefix, rawStart, rawEnd, rawBatchSize) {
-  if (!/^\d{5,9}$/.test(prefix)) throw new Error('seriesPrefix must contain 5–9 digits');
+  // Series catalogs (Android JioNumberSeriesCatalog + web series.ts) ship 4-digit
+  // prefixes, so 4 is the real lower bound — a 5-digit floor rejected every job.
+  if (!/^\d{4,9}$/.test(prefix)) throw new Error('seriesPrefix must contain 4–9 digits');
   const seriesStart = BigInt(prefix + '0'.repeat(10 - prefix.length));
   const seriesEnd = BigInt(prefix + '9'.repeat(10 - prefix.length));
-  const startText = rawStart ? normalizeNumber(rawStart) : seriesStart.toString();
-  const endText = rawEnd ? normalizeNumber(rawEnd) : seriesEnd.toString();
+  // Treat whitespace-only start/end as "not supplied" rather than as a bad number.
+  const trimmedStart = String(rawStart == null ? '' : rawStart).trim();
+  const trimmedEnd = String(rawEnd == null ? '' : rawEnd).trim();
+  const startText = trimmedStart ? normalizeNumber(trimmedStart) : seriesStart.toString();
+  const endText = trimmedEnd ? normalizeNumber(trimmedEnd) : seriesEnd.toString();
   if (!/^\d{10}$/.test(startText) || !/^\d{10}$/.test(endText)) {
     throw new Error('startNumber and endNumber must be 10-digit numbers');
   }
