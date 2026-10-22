@@ -74,6 +74,10 @@ const toggleLogSchema = new mongoose.Schema({
       'PERMISSION_RESTORED',
       'ADMIN_DISABLED',
       'ADMIN_ENABLED',
+      // Shift boundaries from the device's own Shift switch. Kept in step with
+      // web/src/models/ToggleLog.ts — either server may receive them.
+      'SHIFT_ON',
+      'SHIFT_OFF',
     ],
     required: true,
   },
@@ -123,6 +127,7 @@ const enrollmentCodeSchema = new mongoose.Schema({
     callMonitoring:     { type: Boolean, default: false },
     locationTracking:   { type: Boolean, default: false },
     expenseManagement:  { type: Boolean, default: false },
+    shifts:             { type: Boolean, default: false },
   },
   vehicle:   { id: String, registration: String },
   serverUrl: { type: String },
@@ -146,6 +151,7 @@ const deviceEnrollmentSchema = new mongoose.Schema({
     callMonitoring:    { type: Boolean, default: false },
     locationTracking:  { type: Boolean, default: false },
     expenseManagement: { type: Boolean, default: false },
+    shifts:            { type: Boolean, default: false },
   },
   vehicle:     { id: String, registration: String },
   companyId:   { type: String },
@@ -180,6 +186,7 @@ const userSchema = new mongoose.Schema({
     callMonitoring:    { type: Boolean, default: false },
     locationTracking:  { type: Boolean, default: false },
     expenseManagement: { type: Boolean, default: false },
+    shifts:            { type: Boolean, default: false },
   },
 }, { timestamps: true, strict: false });
 
@@ -625,6 +632,10 @@ app.post('/api/enrollment/login', async (req, res) => {
       callMonitoring:    Boolean(caps.callMonitoring),
       locationTracking:  Boolean(caps.locationTracking),
       expenseManagement: Boolean(caps.expenseManagement),
+      // Users saved before `shifts` existed: scheduled shifts rode on locationTracking.
+      shifts: caps.shifts === undefined || caps.shifts === null
+        ? Boolean(caps.locationTracking)
+        : Boolean(caps.shifts),
     };
 
     // Vehicle comes from the assignment the dashboard already maintains, so it
@@ -720,6 +731,53 @@ app.post('/api/enrollment/login', async (req, res) => {
   }
 });
 
+/** Current capabilities for a caps object; `shifts` falls back to locationTracking when never set. */
+function resolveCapabilities(caps) {
+  const c = caps || {};
+  const locationTracking = Boolean(c.locationTracking);
+  return {
+    callMonitoring:    Boolean(c.callMonitoring),
+    locationTracking,
+    expenseManagement: Boolean(c.expenseManagement),
+    shifts: c.shifts === undefined || c.shifts === null ? locationTracking : Boolean(c.shifts),
+  };
+}
+
+// GET /api/enrollment/capabilities — Bearer deviceToken.
+// The phone caches its access at sign-in; this lets it pick up changes made in
+// Device Enrollment (expenses, shifts, ...) without the driver signing in again.
+// The sign-in account is the authority when there is one (the enrollment Edit
+// screen keeps it in sync); code-only enrollments read their code.
+app.get('/api/enrollment/capabilities', async (req, res) => {
+  try {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!token) return res.status(401).json({ error: 'Missing device token' });
+
+    const enrollment = await DeviceEnrollment.findOne({ deviceToken: token });
+    if (!enrollment) return res.status(401).json({ error: 'Invalid device token' });
+    if (enrollment.revoked) return res.status(403).json({ error: 'This device has been revoked' });
+
+    let caps = null;
+    if (enrollment.driverId) {
+      const driver = await Driver.findById(enrollment.driverId);
+      const user = driver ? await User.findById(driver.userId) : null;
+      if (user) caps = user.capabilities;
+    }
+    if (!caps && enrollment.employeeId) {
+      const code = await EnrollmentCode.findOne({ employeeId: enrollment.employeeId }).sort({ createdAt: -1 });
+      if (code) caps = code.capabilities;
+    }
+
+    res.json({
+      capabilities: resolveCapabilities(caps || enrollment.capabilities),
+      webBaseUrl: process.env.NEXT_URL || '',
+    });
+  } catch (err) {
+    console.error('Enrollment capabilities error:', err.message);
+    res.status(500).json({ error: 'Failed to load capabilities' });
+  }
+});
+
 // POST /api/enrollment/codes — X-API-Key protected, creates a new one-time code
 app.post('/api/enrollment/codes', authenticate, async (req, res) => {
   try {
@@ -749,6 +807,7 @@ app.post('/api/enrollment/codes', authenticate, async (req, res) => {
         callMonitoring:    capabilities?.callMonitoring    ?? false,
         locationTracking:  capabilities?.locationTracking  ?? false,
         expenseManagement: capabilities?.expenseManagement ?? false,
+        shifts:            capabilities?.shifts ?? capabilities?.locationTracking ?? false,
       },
       vehicle:   vehicle   || undefined,
       companyId: companyId || undefined,
