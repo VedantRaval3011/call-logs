@@ -1054,16 +1054,5 @@ mountLocationRoutes(app, {
   GoogleAuth,
 });
 
-// ─── Android Caller Lookup Routes ──────────────────────────────
-const mountCallerLookupRoutes = require('./callerLookupRoutes');
-mountCallerLookupRoutes(app, {
-  FcmToken,
-  DeviceEnrollment,
-  loadFirebaseServiceAccount,
-  sendFcmDataToTokens,
-  authenticate,
-  GoogleAuth,
-});
-
 // ─── Export for Vercel ─────────────────────────────────────────
 module.exports = app;
